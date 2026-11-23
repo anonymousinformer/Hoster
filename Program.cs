@@ -472,7 +472,19 @@ static class Player {
     public static void PlayPause() => Do(async () => { if (cur != null) await cur.TryTogglePlayPauseAsync(); });
     public static void Next() => Do(async () => { if (cur != null) await cur.TrySkipNextAsync(); });
     public static void Prev() => Do(async () => { if (cur != null) await cur.TrySkipPreviousAsync(); });
-    public static void OpenSpotify() { try { Process.Start(new ProcessStartInfo("spotify:") { UseShellExecute = true }); } catch { } }
+    // Brings Spotify to the front if it's open, otherwise starts it: the installed app first, then the spotify: link, the Store version, and finally the web player.
+    public static void OpenSpotify() {
+        try {
+            var w = N.Running().FirstOrDefault(x => string.Equals(Path.GetFileName(x.path), "Spotify.exe", StringComparison.OrdinalIgnoreCase));
+            if (w.h != IntPtr.Zero) { N.Focus(w.h); return; }
+        } catch { }
+        string exe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Spotify", "Spotify.exe");
+        string[] tries = { File.Exists(exe) ? exe : null, "spotify:", @"shell:AppsFolder\SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify", "https://open.spotify.com" };
+        foreach (var t in tries) {
+            if (t == null) continue;
+            try { Process.Start(t.StartsWith("shell:") ? new ProcessStartInfo("explorer.exe", t) { UseShellExecute = true } : new ProcessStartInfo(t) { UseShellExecute = true }); return; } catch { }
+        }
+    }
 }
 
 class BarWindow : Shell {
@@ -1786,6 +1798,8 @@ static class Program {
         try {   // an old "DotDesk" start-with-Windows entry becomes a "Hoster" one
             using var rk = Registry.CurrentUser.OpenSubKey(RunKey, true);
             if (rk?.GetValue("DotDesk") != null) { rk.DeleteValue("DotDesk", false); rk.SetValue("Hoster", "\"" + Environment.ProcessPath + "\""); }
+            // if the folder was moved or renamed, point "Start with Windows" at the exe's current location
+            else if (rk?.GetValue("Hoster") is string cur && cur != "\"" + Environment.ProcessPath + "\"") rk.SetValue("Hoster", "\"" + Environment.ProcessPath + "\"");
         } catch { }
         Th.Apply();
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };

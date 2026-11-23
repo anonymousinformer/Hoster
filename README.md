@@ -1,6 +1,8 @@
 # Hoster (.NET 8 / WPF)
 
-Dock + top bar that replace the Windows taskbar, with a control panel. Windows 10/11, 64-bit.
+A dock + top bar that replace the Windows taskbar, with a control panel. Windows 10/11, 64-bit.
+
+<!-- Add a screenshot here: ![Hoster](docs/screenshot.png) -->
 
 ## Run it (stays running after you close the terminal)
 1. Install the **.NET 8 SDK** (https://dotnet.microsoft.com/download).
@@ -10,16 +12,29 @@ Dock + top bar that replace the Windows taskbar, with a control panel. Windows 1
 
 Don't start it with `dotnet run`: that ties it to the terminal. Use run.bat or the .exe.
 
-## Top bar and widgets
-- The top bar is a small pill that stays out of the way. Push the cursor against the very top edge of the screen and it slides in; move away and it slides out.
-- Click the **clock** to open the calendar (live clock, month view, arrows to change month, click the month name to jump back to today).
-- Click the **now playing** pill for the player (artwork, progress, previous / play-pause / next). It works with Spotify desktop and picks up any app that shows Windows media controls. Spotify is preferred when it is playing.
-- The dock and top bar hide automatically while a full-screen app is in front (games, full-screen video, F11 browser, slideshows). Turn it off in Control panel > Top bar.
+## Features
+- **Dock:** pin apps, launch or focus them (dot = running), magnify on hover (adjustable), hover an open app for a live preview of its windows and browser tabs.
+- **Right-click a dock icon:** Unpin, or **End task** to force-close the app and everything it started.
+- **Top bar:** a small pill that slides in when you push the cursor against the top edge. Clock + calendar, now-playing player (Spotify and anything with Windows media controls), CPU/memory, and a **Wi-Fi / Bluetooth menu** (switch networks, toggle radios, see paired devices).
+- **Desktop widgets** that sit under your apps.
+- **Live wallpaper:** a looping, muted video behind your desktop icons (Control panel > Desktop).
+- Dock, bar and widgets get out of the way (and stop drawing) while a full-screen app or a maximised window is in front.
 
 ## Controls
-- Click a dock icon: launch, or focus the app if it's running (dot underneath = running). Right-click a pinned icon > Unpin.
 - Red dot (dock or top bar) or tray icon: control panel. Tray menu also has Quit.
 - Settings: `%APPDATA%\Hoster\settings.json`
 
 ## If the taskbar is stuck hidden
 Run `restore-taskbar.bat`, or tray > "Show Windows taskbar". Quitting from the tray or panel restores it automatically.
+
+## Build from source
+```
+dotnet publish -c Release -o dist
+```
+Requires the .NET 8 SDK on Windows. The only NuGet dependency is [NAudio](https://github.com/naudio/NAudio) (MIT).
+
+## Contributing
+Issues and pull requests are welcome. Note that this app hides and replaces the Windows taskbar, so please test with `restore-taskbar.bat` within reach.
+
+## License
+[MIT](LICENSE)
