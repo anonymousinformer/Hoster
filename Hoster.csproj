@@ -14,6 +14,9 @@
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <TieredPGO>false</TieredPGO>                                 <!-- skip profiling overhead while warming up -->
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>   <!-- no extra GC thread at start -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>  <!-- fewer files to load -->
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />

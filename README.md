@@ -16,7 +16,10 @@ Don't start it with `dotnet run`: that ties it to the terminal. Use run.bat or t
 - **Dock:** pin apps, launch or focus them (dot = running), magnify on hover (adjustable), hover an open app for a live preview of its windows and browser tabs.
 - **Right-click a dock icon:** Unpin, or **End task** to force-close the app and everything it started.
 - **Top bar:** a small pill that slides in when you push the cursor against the top edge. Clock + calendar, now-playing player (Spotify and anything with Windows media controls), CPU/memory, and a **Wi-Fi / Bluetooth menu** (switch networks, toggle radios, see paired devices).
-- **Desktop widgets** that sit under your apps.
+- **Start menu:** right-click an app (or a pinned tile) for **Pin to taskbar** / Unpin.
+- **Battery:** percentage and charging state in the top bar (hidden on PCs without a battery) and a **Battery** desktop widget.
+- **Wi-Fi "Action needed":** when the network you're on wants a sign-in (hotel or cafe Wi-Fi), the Wi-Fi icon in the bar gets an amber dot and the network shows **Action needed** in the menu. Click it to open the sign-in page.
+- **Desktop widgets** that sit under your apps: clock, music player, system monitor, calendar, battery and a **customizable matrix display** (Control panel > Widgets: text, clock, date, battery, CPU or live audio bars; size, dot size, colour, scroll speed).
 - **Live wallpaper:** a looping, muted video behind your desktop icons (Control panel > Desktop).
 - Dock, bar and widgets get out of the way (and stop drawing) while a full-screen app or a maximised window is in front.
 

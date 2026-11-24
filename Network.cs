@@ -7,6 +7,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
+using WNet = Windows.Networking.Connectivity;
 using WRad = Windows.Devices.Radios;
 using WWifi = Windows.Devices.WiFi;
 using WEnum = Windows.Devices.Enumeration;
@@ -15,11 +17,29 @@ using WBt = Windows.Devices.Bluetooth;
 namespace Hoster;
 
 // ---------------- Wi-Fi + Bluetooth (Windows runtime APIs) ----------------
-class WifiNet { public string Ssid; public int Bars; public bool Open, Saved, Current; public WWifi.WiFiAvailableNetwork Raw; }
+class WifiNet { public string Ssid; public int Bars; public bool Open, Saved, Current, Action, NoNet; public WWifi.WiFiAvailableNetwork Raw; }   // Action = Windows' "action needed" (sign-in page)
 class BtDev { public string Name; public bool Connected; }
 
 static class Net {
     static WWifi.WiFiAdapter adapter;
+
+    // ----- "action needed": connected to Wi-Fi that wants a sign-in (captive portal) -----
+    public static bool Alert; public static event Action AlertChanged;
+    public const string SignInUrl = "http://www.msftconnecttest.com/redirect";   // Windows' own connectivity check: bounces to the network's sign-in page
+    public static void SignIn() => Open(SignInUrl);
+    public static void Start() {
+        var t = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) }; t.Tick += async (_, _) => await Check(); t.Start();
+        try { WNet.NetworkInformation.NetworkStatusChanged += _ => Application.Current?.Dispatcher.BeginInvoke(new Action(async () => await Check())); } catch { }
+        _ = Check();
+    }
+    static async Task Check() {
+        bool a = false;
+        if (Store.C.Network) a = await Task.Run(() => {
+            try { foreach (var p in WNet.NetworkInformation.GetConnectionProfiles()) if (p.IsWlanConnectionProfile && p.GetNetworkConnectivityLevel() == WNet.NetworkConnectivityLevel.ConstrainedInternetAccess) return true; } catch { }
+            return false;
+        });
+        if (a != Alert) { Alert = a; AlertChanged?.Invoke(); }
+    }
 
     public static async Task<WRad.Radio> Radio(WRad.RadioKind kind) {
         try {
@@ -63,8 +83,8 @@ static class Net {
         var res = new List<WifiNet>();
         try {
             if (rescan) { try { await ad.ScanAsync(); } catch { } }
-            string cur = null;
-            try { var p = await ad.NetworkAdapter.GetConnectedProfileAsync(); cur = p?.ProfileName; } catch { }
+            string cur = null; var lvl = WNet.NetworkConnectivityLevel.InternetAccess;
+            try { var p = await ad.NetworkAdapter.GetConnectedProfileAsync(); cur = p?.ProfileName; if (p != null) lvl = p.GetNetworkConnectivityLevel(); } catch { }
             var saved = await Task.Run(SavedProfiles);
             foreach (var n in ad.NetworkReport.AvailableNetworks) {
                 if (string.IsNullOrEmpty(n.Ssid)) continue;
@@ -73,6 +93,7 @@ static class Net {
                 if (ex != null) { if (bars > ex.Bars) { ex.Bars = bars; ex.Raw = n; } continue; }
                 res.Add(new WifiNet {
                     Ssid = n.Ssid, Bars = bars, Raw = n, Current = n.Ssid == cur, Saved = saved.Contains(n.Ssid),
+                    Action = n.Ssid == cur && lvl == WNet.NetworkConnectivityLevel.ConstrainedInternetAccess, NoNet = n.Ssid == cur && lvl == WNet.NetworkConnectivityLevel.LocalAccess,
                     Open = n.SecuritySettings.NetworkAuthenticationType == Windows.Networking.Connectivity.NetworkAuthenticationType.Open80211 });
             }
         } catch { }
@@ -189,21 +210,26 @@ class NetFlyout : Flyout {
         wifiBox.Children.Clear();
         if (list.Count == 0) wifiBox.Children.Add(Note("No networks found."));
         foreach (var n in list.Take(8)) wifiBox.Children.Add(NetRow(n));
-        wifiBox.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0), Children = {
-            Link("Rescan", () => { wifiBox.Children.Clear(); FillWifi(true); }), Link("Wi-Fi settings", () => Net.Open("ms-settings:network-wifi")) } });
+        var links = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0), Children = {
+            Link("Rescan", () => { wifiBox.Children.Clear(); FillWifi(true); }), Link("Wi-Fi settings", () => Net.Open("ms-settings:network-wifi")) } };
+        if (list.Any(x => x.Current && x.Action)) links.Children.Add(Link("Disconnect", async () => { Net.Disconnect(); await Task.Delay(800); if (!dead) Load(); }));
+        wifiBox.Children.Add(links);
     }
     UIElement NetRow(WifiNet n) {
         var g = UI.Glyph("\uE701", n.Current ? Th.Accent : Th.Fg, 14); g.Opacity = 0.35 + 0.16 * n.Bars; g.Margin = new Thickness(0, 0, 10, 0);
         var name = UI.Txt(n.Ssid, n.Current ? Th.Accent : Th.Fg, 13, n.Current ? FontWeights.SemiBold : FontWeights.Normal); name.TextTrimming = TextTrimming.CharacterEllipsis;
-        var sub = UI.Txt(n.Current ? "Connected, click to disconnect" : n.Saved ? "Saved" : "", Th.Dim, 10.5);
+        var sub = UI.Txt(n.Action ? "Action needed, click to sign in" : n.Current ? (n.NoNet ? "Connected, no internet. Click to disconnect" : "Connected, click to disconnect") : n.Saved ? "Saved" : "", n.Action ? BattUI.Warn : Th.Dim, 10.5);
+        if (n.Action) { name.Foreground = BattUI.Warn; g.Foreground = BattUI.Warn; }
         var mid = new StackPanel { Children = { name } }; if (sub.Text.Length > 0) mid.Children.Add(sub);
         var dp = new DockPanel();
         if (!n.Open) { var lk = UI.Glyph("\uE72E", Th.Dim, 11); DockPanel.SetDock(lk, System.Windows.Controls.Dock.Right); dp.Children.Add(lk); }
+        if (n.Action) { var w = UI.Glyph("\uE7BA", BattUI.Warn, 13); DockPanel.SetDock(w, System.Windows.Controls.Dock.Right); dp.Children.Add(w); }
         DockPanel.SetDock(g, System.Windows.Controls.Dock.Left); dp.Children.Add(g); dp.Children.Add(mid);
         return UI.Click(dp, () => Pick(n), null, 8, 6);
     }
     async void Pick(WifiNet n) {
         try {
+            if (n.Action) { Net.SignIn(); Close(); return; }      // "action needed": open the network's sign-in page
             if (n.Current) { Net.Disconnect(); await Task.Delay(800); if (!dead) Load(); return; }
             string pw = null;
             if (!n.Saved && !n.Open) { pw = PassDialog.Ask(n.Ssid); if (pw == null) return; }
