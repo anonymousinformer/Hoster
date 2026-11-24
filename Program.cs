@@ -66,11 +66,12 @@ class Cfg {
     public bool LiveWallpaperOn { get; set; }                            // looping video behind the desktop icons
     public string LiveWallpaper { get; set; } = "";                      // path of that video
     public bool ThemeWall { get; set; } = true;                           // picking a theme / accent also sets a wallpaper drawn in its colours
-    public string PowerMode { get; set; } = "off";                        // off | saver | perf
+    public string PowerMode { get; set; } = "off";                        // off | saver | balanced | perf
     public string SaverPlan { get; set; } = "";                           // power plan for Energy saver mode ("" = pick a battery-saving one)
     public string PerfPlan { get; set; } = "";                            // power plan for Performance mode ("" = pick Ultimate / High performance)
     public bool FanControl { get; set; } = true;                          // also set the ASUS fan mode
-    public int FanPerf { get; set; }                                      // ASUS mode used in Performance mode: 0 = Performance, 1 = Turbo
+    public string BalancedPlan { get; set; } = "";                        // power plan for Balanced mode ("" = Windows Balanced)
+    public int FanPerfMode { get; set; } = 1;                             // ASUS fan mode in Performance mode: 0 = Standard, 1 = Performance (MyASUS names; Armoury Crate calls it Turbo)
     public string PlanOrig { get; set; } = "";                            // what to go back to when both modes are off
     public int FanOrig { get; set; } = -1;
     public string EsGuid { get; set; } = "";                              // the plan whose Energy saver "turn on at" level a mode changed...
@@ -330,7 +331,7 @@ static class N {
         if (!GetWindowRect(h, out var r)) return false;
         var mi = new MONITORINFO { cb = Marshal.SizeOf<MONITORINFO>() };
         if (!GetMonitorInfo(MonitorFromWindow(h, 2), ref mi) || (mi.flags & 1) == 0) return false;   // primary monitor only
-        return r.L <= mi.rc.L && r.T <= mi.rc.T && r.R >= mi.rc.R && r.B >= mi.rc.B;
+        return r.L <= mi.rc.L + 2 && r.T <= mi.rc.T + 2 && r.R >= mi.rc.R - 2 && r.B >= mi.rc.B - 2;   // 2px slack: borderless "windowed fullscreen" is often off by a pixel
     }
 
     // Is an ordinary maximised window (title bar and all) in front on the primary monitor? It hides the desktop, so the widgets can pause.
@@ -338,10 +339,42 @@ static class N {
         var h = GetForegroundWindow(); if (h == IntPtr.Zero) return false;
         GetWindowThreadProcessId(h, out var pid); return pid == (uint)Environment.ProcessId;
     }
+    // When a window closes Windows briefly has no foreground window (or the desktop / taskbar). Look at what is really on top instead, so the widgets don't flash on.
+    static bool TopIsMaximised() {
+        var h = GetWindow(FindWindow("Progman", null), 0);                                   // top of the z-order
+        for (int i = 0; h != IntPtr.Zero && i < 300; i++, h = GetWindow(h, 2)) {
+            if (!IsWindowVisible(h) || IsIconic(h) || (GetWindowLong(h, -20) & 0x80) != 0) continue;
+            DwmGetWindowAttribute(h, 14, out int cloaked, 4); if (cloaked != 0) continue;
+            GetWindowThreadProcessId(h, out var pid); if (pid == (uint)Environment.ProcessId) continue;
+            var cn = new StringBuilder(64); GetClassName(h, cn, 64); if (ignoreClasses.Contains(cn.ToString())) continue;
+            var tt = new StringBuilder(8); if (GetWindowText(h, tt, 8) == 0) continue;
+            if ((GetWindowLong(h, -16) & 0x01000000) == 0) return false;                       // the top real window isn't maximised: desktop is visible
+            var mi = new MONITORINFO { cb = Marshal.SizeOf<MONITORINFO>() };
+            return GetMonitorInfo(MonitorFromWindow(h, 2), ref mi) && (mi.flags & 1) != 0;
+        }
+        return false;
+    }
+    // Is ANY ordinary app window showing on the primary monitor (not minimised, hidden, cloaked or a tool window)? The widgets only show on a clear desktop.
+    public static bool AnyWindowOpen() {
+        bool found = false;
+        EnumWindows((h, _) => {
+            if (!IsWindowVisible(h) || IsIconic(h)) return true;
+            if ((GetWindowLong(h, -20) & 0x80) != 0) return true;                                // tool window
+            DwmGetWindowAttribute(h, 14, out int cloaked, 4); if (cloaked != 0) return true;     // virtual desktops, suspended UWP
+            GetWindowThreadProcessId(h, out var pid); if (pid == (uint)Environment.ProcessId) return true;
+            var cn = new StringBuilder(64); GetClassName(h, cn, 64); if (ignoreClasses.Contains(cn.ToString())) return true;
+            var tt = new StringBuilder(8); if (GetWindowText(h, tt, 8) == 0) return true;        // no title: overlay / helper window
+            if (!GetWindowRect(h, out var r) || r.R - r.L < 80 || r.B - r.T < 40) return true;
+            var mi = new MONITORINFO { cb = Marshal.SizeOf<MONITORINFO>() };
+            if (!GetMonitorInfo(MonitorFromWindow(h, 2), ref mi) || (mi.flags & 1) == 0) return true;   // primary monitor only
+            found = true; return false;
+        }, IntPtr.Zero);
+        return found;
+    }
     public static bool Covered() {
-        var h = GetForegroundWindow(); if (h == IntPtr.Zero) return false;
+        var h = GetForegroundWindow(); if (h == IntPtr.Zero) return TopIsMaximised();
         GetWindowThreadProcessId(h, out var pid); if (pid == (uint)Environment.ProcessId) return false;
-        var sb = new StringBuilder(64); GetClassName(h, sb, 64); if (ignoreClasses.Contains(sb.ToString())) return false;
+        var sb = new StringBuilder(64); GetClassName(h, sb, 64); if (ignoreClasses.Contains(sb.ToString())) return TopIsMaximised();
         if ((GetWindowLong(h, -16) & 0x01000000) == 0 || IsIconic(h)) return false;
         var mi = new MONITORINFO { cb = Marshal.SizeOf<MONITORINFO>() };
         return GetMonitorInfo(MonitorFromWindow(h, 2), ref mi) && (mi.flags & 1) != 0;
@@ -377,6 +410,12 @@ static class N {
         var host = DesktopHost();
         if (host != IntPtr.Zero) SetWindowPos(h, host, 0, 0, 0, 0, 0x13 | 0x40);   // + SWP_SHOWWINDOW
         else ShowWindow(h, 4);
+    }
+    // Put a (hidden or parked) window at an exact screen rect, just above the desktop and below every app window, and show it
+    public static void PlaceAtDesktop(IntPtr h, int x, int y, int w, int hh) {
+        if (h == IntPtr.Zero) return;
+        var host = DesktopHost();
+        SetWindowPos(h, host != IntPtr.Zero ? host : IntPtr.Zero, x, y, w, hh, 0x10 | 0x40);   // NOACTIVATE | SHOWWINDOW
     }
     [DllImport("user32.dll")] static extern IntPtr SetParent(IntPtr child, IntPtr parent);
     [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW")] static extern IntPtr SendMsgTimeout(IntPtr h, uint msg, UIntPtr w, IntPtr l, uint flags, uint timeout, out UIntPtr res);
@@ -469,9 +508,9 @@ class Shell : Window {
 
 // ---------------- full-screen detection (dock + bar get out of the way) ----------------
 static class Full {
-    public static bool On, Covered;          // On: full-screen app in front. Covered: a maximised window hides the desktop.
-    public static event Action Changed, CoveredChanged;
-    static int offOn, offCov;
+    public static bool On, Covered, Open;    // On: full-screen app in front. Covered: a maximised window hides the desktop. Open: any app window is showing.
+    public static event Action Changed, CoveredChanged, OpenChanged;
+    static int offOn, offCov, offOpen;
     public static void Poll() {
         bool mine = N.ForegroundIsMine();   // Hoster's own Start menu / flyouts opened over a full-screen or maximised window: nothing has changed behind them
         bool v = Store.C.HideInFullscreen && (mine ? On : N.Fullscreen());
@@ -480,8 +519,11 @@ static class Full {
         if (v != On) { On = v; Changed?.Invoke(); }
         if (mine) return;
         bool c = Store.C.HideInFullscreen && N.Covered();
-        if (Covered && !c) { if (++offCov < 2) c = true; } else offCov = 0;
+        if (Covered && !c) { if (++offCov < 3) c = true; } else offCov = 0;   // must hold ~1.2s before the widgets come back
         if (c != Covered) { Covered = c; CoveredChanged?.Invoke(); }
+        bool o = N.AnyWindowOpen();                                              // widgets hide at once when a window appears...
+        if (Open && !o) { if (++offOpen < 3) o = true; } else offOpen = 0;      // ...and come back only after the desktop has been clear for ~1.2s
+        if (o != Open) { Open = o; OpenChanged?.Invoke(); }
     }
 }
 
@@ -1143,13 +1185,34 @@ class DockWindow : Shell {
             if (sig == liveSig && row != null) return;          // nothing opened or closed: skip rebuilding the whole dock
             liveSig = sig; Build();
         }
-        Full.Changed += async () => { Visibility = Full.On ? Visibility.Hidden : Visibility.Visible; if (Full.On) HidePop(); else await Poll(); };
+        Full.Changed += async () => { SlideAway(Full.On); if (Full.On) HidePop(); else await Poll(); };
         t.Tick += async (_, _) => { if (!Full.On) await Poll(); }; t.Start();
         Loaded += async (_, _) => await Poll();
         MouseMove += (_, e) => Mag(e.GetPosition(row));
         MouseLeave += (_, _) => Mag(new Point(-9999, 0));
     }
-    protected override void Place() => N.AppBar(Handle, 3, Px(Store.C.IconSize + 44), Px(Math.Max(70, 64 + Store.C.IconSize * Store.C.MagnifyAmount / 100.0)));   // extra headroom so big magnification isn't cut off
+    double homeTop; bool away; int slideId;
+    protected override void Place() {
+        N.AppBar(Handle, 3, Px(Store.C.IconSize + 44), Px(Math.Max(70, 64 + Store.C.IconSize * Store.C.MagnifyAmount / 100.0)));   // extra headroom so big magnification isn't cut off
+        if (!away) homeTop = Top;
+    }
+    // A full-screen / windowed-full-screen app is in front: the dock slides down off the screen, and back up when it's gone
+    void SlideAway(bool hide) {
+        int id = ++slideId; double off = WF.Screen.PrimaryScreen.Bounds.Bottom / VisualTreeHelper.GetDpi(this).DpiScaleY;
+        away = hide;
+        if (hide) {
+            if (!UI.Fx || !IsVisible) { Visibility = Visibility.Hidden; return; }
+            var an = new DoubleAnimation(off, TimeSpan.FromMilliseconds(160)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn } };
+            an.Completed += (_, _) => { if (id != slideId) return; BeginAnimation(TopProperty, null); Top = off; Visibility = Visibility.Hidden; };
+            BeginAnimation(TopProperty, an);
+        } else {
+            if (!IsVisible) { Top = off; Visibility = Visibility.Visible; }
+            if (!UI.Fx) { BeginAnimation(TopProperty, null); Place(); return; }
+            var an = new DoubleAnimation(homeTop, TimeSpan.FromMilliseconds(220)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
+            an.Completed += (_, _) => { if (id != slideId) return; BeginAnimation(TopProperty, null); Place(); };
+            BeginAnimation(TopProperty, an);
+        }
+    }
     void Mag(Point m) {
         foreach (var e in row.Children.OfType<StackPanel>()) {
             if (e.RenderTransform is not ScaleTransform) continue;
@@ -2072,7 +2135,7 @@ class ControlPanel : Window {
                     Tog("24-hour clock", c.Clock24, v => c.Clock24 = v),
                     Tog("Show seconds", c.Seconds, v => c.Seconds = v)));
                 body.Children.Add(Group("Behaviour",
-                    Tog("Hide dock and bar in full screen", c.HideInFullscreen, v => c.HideInFullscreen = v, "Games, fullscreen video, F11 browser, slideshows. Desktop widgets also pause behind maximised windows")));
+                    Tog("Hide dock and bar in full screen", c.HideInFullscreen, v => c.HideInFullscreen = v, "Games, fullscreen video, F11 browser, slideshows. Desktop widgets always hide while any window is open")));
                 break;
             case "Widgets":
                 body.Children.Add(PageHead("Widgets", "Small cards that sit on your desktop, under your apps."));
@@ -2088,6 +2151,7 @@ class ControlPanel : Window {
                 body.Children.Add(PageHead("Power", "One switch for battery life, one for speed. Each sets Windows' Energy saver, a power plan and the ASUS fan mode together. The same switches are on the bar's battery button."));
                 body.Children.Add(Group("Modes",
                     Tog("Energy saver mode", c.PowerMode == "saver", v => { Pwr.Set(v ? "saver" : "off"); Dispatcher.BeginInvoke(new Action(() => Go(p))); }, "Energy saver on, your battery-saving power plan, ASUS fan on Whisper"),
+                    Tog("Balanced mode", c.PowerMode == "balanced", v => { Pwr.Set(v ? "balanced" : "off"); Dispatcher.BeginInvoke(new Action(() => Go(p))); }, "Energy saver at its usual level, the Windows Balanced plan, ASUS fan on Standard"),
                     Tog("Performance mode", c.PowerMode == "perf", v => { Pwr.Set(v ? "perf" : "off"); Dispatcher.BeginInvoke(new Action(() => Go(p))); }, "Energy saver off, your ultimate performance power plan, ASUS fan on Performance"),
                     Row("Energy saver right now", UI.Txt(Pwr.EnergySaver(), Th.Dim, 12.5), "Windows only runs Energy saver on battery, so unplugged is where mode 1 shows")));
 
@@ -2100,14 +2164,17 @@ class ControlPanel : Window {
                 }
                 body.Children.Add(Group("Power plans",
                     Row("Energy saver mode uses", Picker(c.SaverPlan, v => c.SaverPlan = v), "Auto picks a plan called Power saver / battery saver"),
+                    Row("Balanced mode uses", Picker(c.BalancedPlan, v => c.BalancedPlan = v), "Auto picks the Windows Balanced plan"),
                     Row("Performance mode uses", Picker(c.PerfPlan, v => c.PerfPlan = v), "Auto picks your Ultimate Performance plan, or High performance")));
 
                 var fanBtns = new StackPanel { Orientation = Orientation.Horizontal };
-                var fp = Btn("Performance", () => { c.FanPerf = 0; Store.Save(); Go(p); }, c.FanPerf == 0); var ft = Btn("Turbo", () => { c.FanPerf = 1; Store.Save(); Go(p); }, c.FanPerf == 1); ft.Margin = new Thickness(6, 0, 0, 0);
+                var fp = Btn("Standard", () => { c.FanPerfMode = 0; Store.Save(); Go(p); }, c.FanPerfMode == 0); var ft = Btn("Performance", () => { c.FanPerfMode = 1; Store.Save(); Go(p); }, c.FanPerfMode == 1); ft.Margin = new Thickness(6, 0, 0, 0);
                 fanBtns.Children.Add(fp); fanBtns.Children.Add(ft);
                 body.Children.Add(Group("ASUS fan mode",
                     Tog("Change the fan mode too", c.FanControl, v => c.FanControl = v, Asus.Note),
-                    Row("Fans in Performance mode", fanBtns, "Performance is the normal fast mode, Turbo spins the fans harder"),
+                    Row("Fans in Performance mode", fanBtns, "Same names as MyASUS. Performance spins the fans harder than Standard"),
+                    Row("Fans in Balanced mode", UI.Txt("Standard", Th.Dim, 12.5), "The normal everyday fan curve"),
+                    Row("Fan mode right now", UI.Txt(Asus.Name(Asus.Get()), Th.Dim, 12.5), "Read back from the laptop. MyASUS may show the old mode until you reopen it"),
                     Row("Fans in Energy saver mode", UI.Txt("Whisper", Th.Dim, 12.5), "Quiet and cool, lowest power")));
                 break;
             }
@@ -2438,19 +2505,47 @@ static class WidgetHost {
     public static void Restack() { foreach (var k in Kinds) if (open.TryGetValue(k, out var w) && w.AutoPlaced) w.Replace(); }
     public static void Start() {
         Sync(); Store.Changed += OnChanged;
-        // hidden windows aren't drawn, so the widgets cost nothing behind a full-screen app
-        Action hide = () => {
-            bool idle = Full.On || Full.Covered;
-            foreach (var w in open.Values.ToList()) { if (idle) w.Visibility = Visibility.Hidden; else w.Reveal(); }
-        };
-        Full.Changed += hide; Full.CoveredChanged += hide;
+        // hidden windows aren't drawn, so the widgets cost nothing behind a full-screen app or any open window
+        Full.Changed += Apply; Full.CoveredChanged += Apply; Full.OpenChanged += Apply;
+        Apply();
         var t = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) }; int n = 0;
         t.Tick += (_, _) => {
-            if (Full.On || Full.Covered) return;
+            if (Idle) return;
             foreach (var w in open.Values.ToList()) w.Tick();
             if (!Editing && ++n % 3 == 0) foreach (var w in open.Values.ToList()) w.ToBottom();   // keep them under your apps
         };
         t.Start();
+    }
+    // Widgets are hidden only behind a full-screen app (exclusive full screen or borderless "windowed full screen"). Normal and maximised windows don't hide them; they sit under your apps.
+    static bool Idle => Full.On;
+    // screen-pixel rectangles of the widgets that are showing, and a one-line state dump for wallslide.log
+    public static List<Rect> Rects() {
+        var l = new List<Rect>();
+        foreach (var w in open.Values.ToList()) {
+            try {
+                if (!w.IsVisible || !w.IsLoaded || w.ActualWidth <= 0) continue;
+                var p = w.PointToScreen(new Point(0, 0)); var dpi = VisualTreeHelper.GetDpi(w);
+                l.Add(new Rect(p.X, p.Y, w.ActualWidth * dpi.DpiScaleX, w.ActualHeight * dpi.DpiScaleY));
+            } catch { }
+        }
+        return l;
+    }
+    public static string State() => "On=" + Full.On + " Covered=" + Full.Covered + " Open=" + Full.Open + " Held=" + (DateTime.UtcNow < holdUntil) + " widgets=" + string.Join(",", open.Select(k => k.Key + ":" + (k.Value.IsVisible ? "vis" : "HIDDEN")));
+    static DateTime holdUntil; static DispatcherTimer holdTimer;
+    // While the wallpaper changes, Explorer / Windows can look like "a window opened" for a moment. Don't hide the widgets because of that.
+    public static void Hold(int ms) {
+        var d = Application.Current?.Dispatcher; if (d == null) return;
+        d.BeginInvoke(new Action(() => {
+            var t = DateTime.UtcNow.AddMilliseconds(ms); if (t > holdUntil) holdUntil = t;
+            holdTimer ??= new DispatcherTimer(); holdTimer.Stop(); holdTimer.Interval = holdUntil - DateTime.UtcNow + TimeSpan.FromMilliseconds(150);
+            holdTimer.Tick -= HoldEnd; holdTimer.Tick += HoldEnd; holdTimer.Start();
+        }));
+    }
+    static void HoldEnd(object s, EventArgs e) { holdTimer.Stop(); Apply(); }   // hold over: hide them now if a window really is open
+    static void Apply() {
+        bool idle = Idle;
+        if (idle && DateTime.UtcNow < holdUntil) return;
+        foreach (var w in open.Values.ToList()) { if (idle) w.Visibility = Visibility.Hidden; else w.Reveal(); }
     }
     static void Sync() {
         foreach (var k in Kinds) if (!Store.C.Widgets.Any(x => x.Kind == k)) Store.C.Widgets.Add(new WCfg { Kind = k, On = !(k == "Battery" && !Batt.Has) });   // no battery widget on PCs without one
@@ -2460,12 +2555,13 @@ static class WidgetHost {
             else if (!c.On && has) { open.Remove(c.Kind); w.Close(); }
         }
     }
-    static void OnChanged() { Sync(); foreach (var w in open.Values.ToList()) w.Rebuild(); }
+    static void OnChanged() { Sync(); foreach (var w in open.Values.ToList()) w.Rebuild(); Apply(); }
     public static void Edit(bool on) {
         if (Editing == on) return; Editing = on;
         foreach (var w in open.Values.ToList()) { w.Topmost = on; w.Rebuild(); }
         if (on) { banner = new EditBanner(); banner.Show(); }
         else { banner?.Close(); banner = null; foreach (var w in open.Values.ToList()) w.ToBottom(); }
+        Apply();
     }
     public static void Reset() { foreach (var c in Store.C.Widgets) { c.X = -1; c.Y = -1; c.Size = 100; } Store.Save(); }
 }
@@ -2503,7 +2599,17 @@ static class Wall {
         var c = Store.C; if (!force && !c.ThemeWall) return;
         var p = Th.Get(c.Theme); string key = p.Id + "|" + c.Accent;
         if (!force && key == last) return;
-        try { var f = Make(p, c.Accent); var old = lastFile; last = key; lastFile = f; if (UI.Fx) WallSlide.Run(f, old); else N.Wallpaper(f); } catch { }
+        last = key; var accent = c.Accent; WidgetHost.Hold(6000);
+        Task.Run(() => {   // drawing + PNG saving + decoding all happen off the UI thread, so the widgets never stall
+            try { var f = Sta(() => Make(p, accent)).GetAwaiter().GetResult(); var old = lastFile; lastFile = f; if (UI.Fx) WallSlide.Run(f, old); else N.Wallpaper(f); } catch { }
+        });
+    }
+    // runs work on its own low-priority STA thread (WPF drawing needs STA); results are frozen so the UI thread can use them
+    public static Task<T> Sta<T>(Func<T> work) {
+        var tcs = new TaskCompletionSource<T>();
+        var t = new Thread(() => { try { tcs.SetResult(work()); } catch (Exception e) { tcs.SetException(e); } });
+        t.SetApartmentState(ApartmentState.STA); t.IsBackground = true; t.Priority = ThreadPriority.BelowNormal; t.Start();
+        return tcs.Task;
     }
 
     static string Make(Pal p, string accent) {
@@ -2544,7 +2650,7 @@ static class Wall {
                 dc.DrawRectangle(vg, null, full);
             }
         }
-        var rtb = new RenderTargetBitmap(W, H, 96, 96, PixelFormats.Pbgra32); rtb.Render(dv);
+        var rtb = new RenderTargetBitmap(W, H, 96, 96, PixelFormats.Pbgra32); rtb.Render(dv); rtb.Freeze();
         var enc = new PngBitmapEncoder(); enc.Frames.Add(BitmapFrame.Create(rtb));
         using (var fs = File.Create(file)) enc.Save(fs);
         try { foreach (var old in Directory.GetFiles(Dir, p.Id + "-*.png")) if (old != file) File.Delete(old); } catch { }   // keep one picture per theme
@@ -2552,14 +2658,27 @@ static class Wall {
     }
 }
 
-// ---------------- wallpaper change animation: the new picture whooshes in from the top-right to the bottom-left ----------------
-// The slide lives INSIDE the desktop's own wallpaper layer (under the icons, above the wallpaper), like a live wallpaper does, so it is part of
-// the desktop and can't be drawn over any app, widget, dock or menu. It shows the old picture, slides the new one over it as a motion-blurred
+// ---------------- wallpaper change animation: the old picture smears sideways, then the new one wipes in left to right, blurred, and sharpens as it lands ----------------
+// The slide is a click-through window placed directly above the desktop and below every app window (like the widgets), so it can't be drawn over
+// any app, dock or menu. It covers the desktop icons for the second it runs. It shows the old picture, slides the new one over it as a motion-blurred
 // streak that sharpens as it lands, then sets the real wallpaper and goes away. If the desktop layer can't be found it just changes the wallpaper.
 class WallSlide : Window {
     static WallSlide cur;
     static readonly QuinticEase Whoosh = MakeWhoosh();
     static QuinticEase MakeWhoosh() { var e = new QuinticEase { EasingMode = EasingMode.EaseOut }; e.Freeze(); return e; }
+    [DllImport("gdi32.dll")] static extern IntPtr CreateRectRgn(int a, int b, int c, int d);
+    [DllImport("gdi32.dll")] static extern int CombineRgn(IntPtr dst, IntPtr a, IntPtr b, int mode);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
+    [DllImport("user32.dll")] static extern int SetWindowRgn(IntPtr h, IntPtr rgn, bool redraw);
+    // the slide gets a hole where each widget is, so it can never cover one whatever the window order does
+    static void CutWidgetHoles(IntPtr hw, int left, int top, int w, int h) {
+        var rgn = CreateRectRgn(0, 0, w, h);
+        foreach (var r in WidgetHost.Rects()) {
+            var hole = CreateRectRgn((int)(r.Left - left), (int)(r.Top - top), (int)Math.Ceiling(r.Right - left), (int)Math.Ceiling(r.Bottom - top));
+            CombineRgn(rgn, rgn, hole, 4); DeleteObject(hole);   // RGN_DIFF
+        }
+        if (SetWindowRgn(hw, rgn, true) == 0) DeleteObject(rgn);   // on success Windows owns the region
+    }
     [DllImport("user32.dll", CharSet = CharSet.Auto, EntryPoint = "SystemParametersInfo")] static extern int SpiGet(int a, int b, StringBuilder sb, int ini);
 
     readonly string file; readonly DispatcherTimer end = new() { Interval = TimeSpan.FromMilliseconds(900) };
@@ -2567,12 +2686,32 @@ class WallSlide : Window {
 
     static void Instant(string file) => Task.Run(() => N.Wallpaper(file));
 
+    class Prep { public BitmapSource Cur, New, OldStreak, NewStreak; }
+    static int gen;
+    // Called from a background thread. Decoding and the two motion-blur renders happen here; the UI thread only builds the window.
     public static void Run(string file, string old) {
-        cur?.Abort(); cur = null;
-        if (!N.WallpaperLayer(out _, out _)) { Instant(file); return; }
-        WallSlide w = null;
-        try { w = new WallSlide(file, old); cur = w; w.Show(); }
-        catch { cur = null; try { w?.Close(); } catch { } Instant(file); }
+        int id = Interlocked.Increment(ref gen); Prep p = null;
+        try { p = Wall.Sta(() => Prepare(file, old)).GetAwaiter().GetResult(); } catch (Exception ex) { Log("prep: " + ex); }
+        var disp = Application.Current?.Dispatcher; if (disp == null) { Instant(file); return; }
+        disp.BeginInvoke(DispatcherPriority.Background, new Action(() => {
+            if (id != gen) return;                                         // a newer change replaced this one
+            cur?.Abort(); cur = null;
+            if (p == null) { Instant(file); return; }
+            WallSlide w = null;
+            try { w = new WallSlide(file, p); cur = w; w.Show(); }
+            catch (Exception ex) { Log("run: " + ex); cur = null; try { w?.Close(); } catch { } Instant(file); }
+        }));
+    }
+    static Prep Prepare(string file, string old) {
+        var b = WF.Screen.PrimaryScreen.Bounds; int px = Math.Min(1920, b.Width);
+        var cur0 = Current(old, px); if (cur0 == null) return null;       // can't show the old one: skip the slide
+        var nw = Load(file, px); if (nw == null) return null;
+        var os = Current(old, 960) ?? cur0; var ns = Load(file, 960) ?? nw;
+        return new Prep { Cur = cur0, New = nw, OldStreak = Streak(os), NewStreak = Streak(ns) };
+    }
+    // what went wrong, if the slide ever fails: %AppData%\Hoster\wallslide.log
+    static void Log(string m) {
+        try { var d = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Hoster"); Directory.CreateDirectory(d); File.AppendAllText(Path.Combine(d, "wallslide.log"), DateTime.Now + " " + m + "\r\n"); } catch { }
     }
     void Abort() { end.Stop(); done = true; try { Close(); } catch { } }
 
@@ -2594,58 +2733,64 @@ class WallSlide : Window {
 
     // the picture blurred along the direction it travels, made by averaging shifted copies (drawn once, a few ms)
     static BitmapSource Streak(BitmapSource src) {
-        int w = src.PixelWidth, h = src.PixelHeight, n = 9; double dx = w * 0.012;
+        int w = src.PixelWidth, h = src.PixelHeight, n = 15; double dx = w * 0.016;               // strong, purely horizontal smear
         var dv = new DrawingVisual();
         using (var dc = dv.RenderOpen())
             for (int i = 0; i < n; i++) {
                 double o = (i - (n - 1) / 2.0) * dx;
                 dc.PushOpacity(1.0 / (i + 1));                                  // 1, 1/2, 1/3 ... stacks into an even average
-                dc.DrawImage(src, new Rect(o, -o * 0.35, w, h));
+                dc.DrawImage(src, new Rect(o, 0, w, h));
                 dc.Pop();
             }
         var rtb = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32); rtb.Render(dv); rtb.Freeze(); return rtb;
     }
 
-    WallSlide(string file, string old) {
+    WallSlide(string file, Prep pr) {
         this.file = file;
-        var b = WF.Screen.PrimaryScreen.Bounds; int px = Math.Min(2560, b.Width);
-        var cur0 = Current(old, px); if (cur0 == null) throw new InvalidOperationException("no current wallpaper");   // can't show the old one: skip the slide
-        var nw = Load(file, px); if (nw == null) throw new InvalidOperationException("no new wallpaper");
-        var small = Load(file, 1280);
+        var b = WF.Screen.PrimaryScreen.Bounds;
 
         WindowStyle = WindowStyle.None; ResizeMode = ResizeMode.NoResize; ShowInTaskbar = false; ShowActivated = false; Topmost = false;
         Background = Brushes.Black; WindowStartupLocation = WindowStartupLocation.Manual;
         Left = -20000; Top = -20000; Width = SystemParameters.PrimaryScreenWidth; Height = SystemParameters.PrimaryScreenHeight;   // parked off screen until it is inside the desktop
-        SourceInitialized += (_, _) => {
-            var h = new WindowInteropHelper(this).Handle; N.NoActivate(h);
-            if (!N.Embed(h, b.Left, b.Top, b.Width, b.Height)) { Width = 1; Height = 1; failed = true; }
-        };
+        SourceInitialized += (_, _) => { var h = new WindowInteropHelper(this).Handle; N.NoActivate(h); N.ClickThrough(h); };   // never takes focus, clicks go to the desktop icons behind
 
-        var oldImg = new Image { Source = cur0, Stretch = Stretch.UniformToFill };
-        var tr = new TranslateTransform(20000, 0);
-        var sharp = new Image { Source = nw, Stretch = Stretch.UniformToFill, CacheMode = new BitmapCache() };
-        var blur = new Image { Source = Streak(small ?? nw), Stretch = Stretch.UniformToFill, Opacity = 0, CacheMode = new BitmapCache() };
-        var layer = new Grid { ClipToBounds = true, IsHitTestVisible = false, RenderTransform = tr, Children = { sharp, blur } };
-        Content = new Grid { ClipToBounds = true, Children = { oldImg, layer } };
+        var oldImg = new Image { Source = pr.Cur, Stretch = Stretch.UniformToFill };
+        var oldBlur = new Image { Source = pr.OldStreak, Stretch = Stretch.UniformToFill, Opacity = 0, CacheMode = new BitmapCache() };   // the old picture smears first
+        var sharp = new Image { Source = pr.New, Stretch = Stretch.UniformToFill, CacheMode = new BitmapCache() };
+        var blur = new Image { Source = pr.NewStreak, Stretch = Stretch.UniformToFill, Opacity = 1, CacheMode = new BitmapCache() };
+        var s0 = new GradientStop(Colors.White, -0.3); var s1 = new GradientStop(Colors.Transparent, 0);      // soft left-to-right wipe edge
+        var layer = new Grid { ClipToBounds = true, IsHitTestVisible = false, Children = { sharp, blur },
+            OpacityMask = new LinearGradientBrush(new GradientStopCollection { s0, s1 }, new Point(0, 0), new Point(1, 0)) };
+        Content = new Grid { ClipToBounds = true, Children = { oldImg, oldBlur, layer } };
 
         end.Tick += (_, _) => { end.Stop(); if (ReferenceEquals(cur, this)) cur = null; Close(); };
-        Closed += (_, _) => Application.Current?.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(Mem.Trim));   // give the pictures' memory back
+        Closed += (_, _) => { if (ReferenceEquals(cur, this)) cur = null; Application.Current?.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(WidgetHost.Sink)); };   // widgets back on top; the 2-minute Mem timer frees the pictures later (a forced GC here caused the freeze)
         Loaded += (_, _) => {
-            if (failed) { Instant(file); Close(); return; }
-            double W = ActualWidth, H = ActualHeight; var d = TimeSpan.FromMilliseconds(750);
-            tr.X = W; tr.Y = -H * 0.35;
-            tr.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(W, 0, d) { EasingFunction = Whoosh });
-            blur.BeginAnimation(OpacityProperty, new DoubleAnimation(1, 0, d) { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseIn } });   // sharpens as it lands
-            var ya = new DoubleAnimation(-H * 0.35, 0, d) { EasingFunction = Whoosh };
-            ya.Completed += (_, _) => {
+            // WPF has finished showing it off screen: now move it over the desktop, under every app (same trick the widgets use)
+            var hw = new WindowInteropHelper(this).Handle;
+            try { N.PlaceAtDesktop(hw, b.Left, b.Top, b.Width, b.Height); }
+            catch (Exception ex) { Log("place: " + ex); Instant(file); Close(); return; }
+            var keep = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(40) };   // keep widgets stacked above the slide while Windows shuffles the desktop
+            keep.Tick += (_, _) => WidgetHost.Sink(); keep.Start(); Closed += (_, _) => keep.Stop();
+            WidgetHost.Sink(); WidgetHost.Hold(2500);
+            try { CutWidgetHoles(hw, b.Left, b.Top, b.Width, b.Height); } catch (Exception ex) { Log("holes: " + ex); }
+            int step = 0; var spy = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(350) };   // diagnostics: what the widgets are doing during the slide
+            spy.Tick += (_, _) => { Log("t+" + (++step * 350) + "ms " + WidgetHost.State()); if (step >= 5) spy.Stop(); }; spy.Start(); Log("start " + WidgetHost.State());
+            var d = TimeSpan.FromMilliseconds(700); var wait = TimeSpan.FromMilliseconds(130);
+            oldBlur.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, wait));                         // 1. the old picture smears sideways
+            var ease = new CubicEase { EasingMode = EasingMode.EaseInOut };
+            s1.BeginAnimation(GradientStop.OffsetProperty, new DoubleAnimation(0, 1.3, d) { BeginTime = wait, EasingFunction = ease });   // 2. the new one wipes in...
+            blur.BeginAnimation(OpacityProperty, new DoubleAnimation(1, 0, d + TimeSpan.FromMilliseconds(120)) { BeginTime = wait, EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseIn } });   // ...and sharpens
+            var wa = new DoubleAnimation(-0.3, 1, d) { BeginTime = wait, EasingFunction = ease };
+            wa.Completed += (_, _) => {
                 if (done) return;
                 Instant(file);                                                    // the real wallpaper changes underneath
+                WidgetHost.Sink();
                 end.Start();                                                      // the slide stays a moment so Windows' own fade isn't seen
             };
-            tr.BeginAnimation(TranslateTransform.YProperty, ya);
+            s0.BeginAnimation(GradientStop.OffsetProperty, wa);
         };
     }
-    bool failed;
 }
 
 // ---------------- Performance mode / Energy saver mode: Windows Energy saver + a power plan + the ASUS fan mode ----------------
@@ -2676,6 +2821,23 @@ static class Pwr {
     }
     static void SetThreshold(string plan, int v) => Pc("/setdcvalueindex " + plan + " " + SubEs + " " + EsThresh + " " + v);
     static void SetPlan(string guid) => Pc("/setactive " + guid);
+
+    const string SaverGuid = "a1841308-3541-4fab-bc81-f71556f20b4a", UltimateGuid = "e9a42b02-d5df-448d-aa00-03f14749eb61";   // Windows' built-in Power saver / Ultimate Performance plans
+
+    // Uses the plan you picked if it exists; otherwise finds the built-in one, and if Windows has hidden/removed it, creates it with powercfg /duplicatescheme
+    static string Ensure(string chosen, string builtIn, string word) {
+        var all = Plans(); chosen = (chosen ?? "").ToLowerInvariant();
+        if (chosen.Length > 0 && all.Any(x => x.guid == chosen)) return chosen;
+        if (all.Any(x => x.guid == builtIn)) return builtIn;
+        var hit = all.FirstOrDefault(x => x.name.IndexOf(word, StringComparison.OrdinalIgnoreCase) >= 0); if (hit.guid != null) return hit.guid;
+        Pc("/duplicatescheme " + builtIn + " " + builtIn);                                   // same GUID as the built-in one
+        if (Plans().Any(x => x.guid == builtIn)) return builtIn;
+        Pc("/duplicatescheme " + builtIn);                                                   // some Windows builds refuse a fixed GUID: let it make a new one
+        hit = Plans().FirstOrDefault(x => x.name.IndexOf(word, StringComparison.OrdinalIgnoreCase) >= 0);
+        return hit.guid;                                                                      // null = couldn't create it, caller falls back
+    }
+
+    const string BalancedGuid = "381b4222-f694-41f0-9685-ff5bb260df2e";   // Windows' built-in Balanced plan
 
     static string Pick(string chosen, params string[] words) {
         var all = Plans(); chosen = (chosen ?? "").ToLowerInvariant();
@@ -2711,19 +2873,20 @@ static class Pwr {
                 if (overlayUsed) { try { PowerSetActiveOverlayScheme(Guid.Empty); } catch { } overlayUsed = false; }
                 fan = c.FanOrig >= 0 && c.FanOrig <= 2 ? c.FanOrig : 0;
             } else {
-                bool saver = mode == "saver"; int level = saver ? 100 : 0;                  // 100 = Energy saver always on (on battery), 0 = never
-                string plan = saver ? Pick(c.SaverPlan, "saver", "saving", "eco", "battery") : Pick(c.PerfPlan, "ultimate", "performance");
+                bool saver = mode == "saver", bal = mode == "balanced"; int level = saver ? 100 : bal ? 20 : 0;                  // 100 = Energy saver always on (on battery), 0 = never
+                string plan = (saver ? Ensure(c.SaverPlan, SaverGuid, "saver") : bal ? Ensure(c.BalancedPlan, BalancedGuid, "balanced") : Ensure(c.PerfPlan, UltimateGuid, "ultimate"))   // create it if missing...
+                    ?? (saver ? Pick(c.SaverPlan, "saver", "saving", "eco", "battery") : bal ? Pick(c.BalancedPlan, "balanced") : Pick(c.PerfPlan, "ultimate", "performance"));   // ...else the old fallbacks
                 if (plan == null) {                                                          // modern PCs hide the old plans: use Windows' own power mode instead
-                    try { PowerSetActiveOverlayScheme(saver ? Efficiency : BestPerf); overlayUsed = true; } catch { }
+                    try { PowerSetActiveOverlayScheme(saver ? Efficiency : bal ? Guid.Empty : BestPerf); overlayUsed = true; } catch { }
                     plan = Active();
                 } else if (overlayUsed) { try { PowerSetActiveOverlayScheme(Guid.Empty); } catch { } overlayUsed = false; }
                 if (!string.IsNullOrEmpty(plan)) {
                     int cur = Threshold(plan); if (cur >= 0) { c.EsGuid = plan; c.EsVal = cur; }
                     SetThreshold(plan, level); SetPlan(plan);                                // setting it on the plan then re-applying the plan is what makes Windows act on it
                 }
-                fan = saver ? 2 : c.FanPerf;                                                 // ASUS: 2 = Whisper (silent), 0 = Performance, 1 = Turbo
+                fan = saver ? 2 : bal ? 0 : c.FanPerfMode;                                                 // ASUS: 2 = Whisper (silent), 0 = Performance, 1 = Turbo
             }
-            if (c.FanControl) Asus.Set(fan);
+            if (c.FanControl) Asus.Apply(fan);
         } catch { }
         Application.Current?.Dispatcher.BeginInvoke(new Action(() => Store.Save()));                  // keep what we remembered
     }
@@ -2758,7 +2921,50 @@ static class Asus {
             return BitConverter.ToInt32(Call(DEVS, a), 0) == 1;
         } catch { return false; }
     }
-    public static string Note { get { Open(); return H != Bad ? "ASUS fan control found" : err == 5 ? "Found, but Windows blocked it: run Hoster as administrator" : "Not found: needs an ASUS laptop with the ASUS System Control Interface driver"; } }
+    static int gen;
+    static void Log(string m) {
+        try { var d = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Hoster"); Directory.CreateDirectory(d); File.AppendAllText(Path.Combine(d, "asus.log"), DateTime.Now.ToString("HH:mm:ss ") + m + "\r\n"); } catch { }
+    }
+    // 0 = Standard, 1 = Performance (Armoury Crate: Turbo), 2 = Whisper (Armoury Crate: Silent): the names MyASUS shows
+    public static string Name(int m) => m switch { 0 => "Standard", 1 => "Performance", 2 => "Whisper", _ => "unknown" };
+    static bool Valid(int m) => m >= 0 && m <= 2;
+
+    // Sets the mode and reads it back. Returns true when the laptop confirms it (or can't be read back but accepted the write).
+    static bool Verified(int mode) {
+        for (int i = 0; i < 4; i++) {
+            bool set = Set(mode); Thread.Sleep(250); int now = Get();
+            Log($"set {Name(mode)}: write {(set ? "ok" : "refused")}, reads back {(Valid(now) ? Name(now) : "n/a")}");
+            if (now == mode) return true;
+            if (set && !Valid(now)) return true;
+        }
+        return false;
+    }
+    // Sets the fan mode, then checks again after a few seconds: ASUS' own services (Armoury Crate / MyASUS) react to a power plan change
+    // a moment later and can put the old mode back, which is why the fans seemed not to change.
+    public static void Apply(int mode) {
+        int my = Interlocked.Increment(ref gen);
+        Verified(mode);
+        Task.Run(async () => {
+            foreach (var wait in new[] { 1500, 3500, 8000 }) {
+                await Task.Delay(wait);
+                if (my != gen) return;                                   // a newer request replaced this one
+                int now = Get();
+                if (Valid(now) && now != mode) { Log($"mode was changed back to {Name(now)}, setting {Name(mode)} again"); Verified(mode); }
+            }
+        });
+    }
+    static bool AcRunning() {
+        try { foreach (var p in Process.GetProcesses()) using (p) if (p.ProcessName.StartsWith("ArmouryCrate", StringComparison.OrdinalIgnoreCase)) return true; } catch { }
+        return false;
+    }
+    public static string Note {
+        get {
+            Open();
+            if (H == Bad) return err == 5 ? "Found, but Windows blocked it: run Hoster as administrator" : "Not found: needs an ASUS laptop with the ASUS System Control Interface driver";
+            int m = Get();
+            return "ASUS fan control found" + (Valid(m) ? ", now on " + Name(m) : "") + (AcRunning() ? ". Armoury Crate is running and can override the mode" : "");
+        }
+    }
 }
 
 // ---------------- the little menu on the bar's battery button ----------------
@@ -2770,6 +2976,7 @@ class PowerFlyout : Flyout {
         var st = UI.Txt(BattUI.Status(), Th.Dim, 11.5); st.Margin = new Thickness(0, 2, 0, 0); st.TextWrapping = TextWrapping.Wrap; col.Children.Add(st);
         var es = UI.Txt("Energy saver is " + Pwr.EnergySaver(), Th.Dim, 11.5); es.Margin = new Thickness(0, 0, 0, 10); col.Children.Add(es);
         col.Children.Add(Line("Energy saver mode", "Battery plan, Energy saver on, whisper fans", Pwr.Mode == "saver", v => Pwr.Set(v ? "saver" : "off")));
+        col.Children.Add(Line("Balanced mode", "Balanced plan, normal Energy saver, standard fans", Pwr.Mode == "balanced", v => Pwr.Set(v ? "balanced" : "off")));
         col.Children.Add(Line("Performance mode", "Fast plan, Energy saver off, performance fans", Pwr.Mode == "perf", v => Pwr.Set(v ? "perf" : "off")));
         var more = UI.Click(UI.Txt("Battery settings", Th.Dim, 12), () => Net.Open("ms-settings:batterysaver"), null, 10, 6); more.Margin = new Thickness(-10, 8, 0, 0); more.HorizontalAlignment = HorizontalAlignment.Left;
         col.Children.Add(more);

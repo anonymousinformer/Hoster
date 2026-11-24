@@ -1,4 +1,5 @@
 @echo off
+rem FAST build (no ReadyToRun precompile). Use release.bat for the final, faster-starting exe.
 rem Builds Hoster.exe and starts it detached. You can close this window afterwards.
 rem To just START Hoster (no rebuild, much faster), double-click dist\Hoster.exe instead.
 rem Works from any folder, whatever it is called (spaces, brackets, OneDrive, network drives).
@@ -13,7 +14,7 @@ if exist "DotDesk.csproj" del "DotDesk.csproj"
 if exist "dist\DotDesk.exe" del "dist\DotDesk.exe"
 where dotnet >nul 2>&1
 if errorlevel 1 goto nosdk
-dotnet publish "Hoster.csproj" -c Release -o "dist"
+dotnet publish "Hoster.csproj" -c Release -o "dist" -p:PublishReadyToRun=false --nologo
 if errorlevel 1 goto failed
 start "" "%~dp0dist\Hoster.exe"
 popd

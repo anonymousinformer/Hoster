@@ -12,9 +12,12 @@
     <RootNamespace>Hoster</RootNamespace>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
+    <PublishReadyToRun>true</PublishReadyToRun>                  <!-- precompiled code: biggest start-up win, less JIT while running -->
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <TieredPGO>false</TieredPGO>                                 <!-- skip profiling overhead while warming up -->
+    <TieredCompilationQuickJitForLoops>true</TieredCompilationQuickJitForLoops>
+    <DebugType>none</DebugType>
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>   <!-- no extra GC thread at start -->
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>  <!-- fewer files to load -->
   </PropertyGroup>

@@ -155,10 +155,11 @@ class VizBar : Shell {
 
 class WaveView : FrameworkElement {
     const int Pts = 72;
-    readonly double[] v = new double[Pts];
-    readonly DispatcherTimer tick = new() { Interval = TimeSpan.FromMilliseconds(33 ) };   // ~30 fps
+    readonly double[] v = new double[Pts], tgt = new double[Pts], y = new double[Pts];   // reused every frame: no per-frame arrays
+    readonly DispatcherTimer tick = new() { Interval = TimeSpan.FromMilliseconds(33) };   // ~30 fps
     public bool Active;
     bool drawn;
+    Brush fill; Pen line; Color fillCol;      // built once, rebuilt only when the accent changes
     public WaveView() {
         IsHitTestVisible = false;
         tick.Tick += (_, _) => Frame();
@@ -166,7 +167,7 @@ class WaveView : FrameworkElement {
     }
     void Frame() {
         bool live = Active && Environment.TickCount64 - Viz.Last < 300;
-        double[] tgt = new double[Pts]; bool any = false;
+        bool any = false;
         for (int i = 0; i < Pts; i++) {
             double f = i * (Viz.Bands - 1) / (double)(Pts - 1); int a = (int)f, b = Math.Min(Viz.Bands - 1, a + 1);
             tgt[i] = live ? Viz.Level[a] + (Viz.Level[b] - Viz.Level[a]) * (f - a) : 0;
@@ -182,19 +183,26 @@ class WaveView : FrameworkElement {
     protected override void OnRender(DrawingContext dc) {
         double w = ActualWidth, h = ActualHeight; if (w <= 0 || h <= 0) return;
         var col = (Th.Accent as SolidColorBrush)?.Color ?? Colors.White;
-        var fill = new LinearGradientBrush(Color.FromArgb(150, col.R, col.G, col.B), Color.FromArgb(0, col.R, col.G, col.B), 90); fill.Freeze();
-        var line = new Pen(new SolidColorBrush(Color.FromArgb(210, 255, 255, 255)), 1.4); line.Freeze();
+        if (fill == null || col != fillCol) {
+            fillCol = col;
+            var gb = new LinearGradientBrush(Color.FromArgb(150, col.R, col.G, col.B), Color.FromArgb(0, col.R, col.G, col.B), 90); gb.Freeze(); fill = gb;
+        }
+        if (line == null) {
+            var lb = new SolidColorBrush(Color.FromArgb(210, 255, 255, 255)); lb.Freeze();
+            line = new Pen(lb, 1.4); line.Freeze();
+        }
+        for (int i = 0; i < Pts; i++) y[i] = h - Math.Pow(v[i], 0.85) * h * 0.92;   // pow once per point, not twice
         var g = new StreamGeometry();
         using (var c = g.Open()) {
             c.BeginFigure(new Point(0, h), true, true);
-            for (int i = 0; i < Pts; i++) c.LineTo(new Point(w * i / (Pts - 1), h - Math.Pow(v[i], 0.85) * h * 0.92), true, true);
+            for (int i = 0; i < Pts; i++) c.LineTo(new Point(w * i / (Pts - 1), y[i]), true, true);
             c.LineTo(new Point(w, h), true, true);
         }
         g.Freeze(); dc.DrawGeometry(fill, null, g);
         var top = new StreamGeometry();
         using (var c = top.Open()) {
-            c.BeginFigure(new Point(0, h - Math.Pow(v[0], 0.85) * h * 0.92), false, false);
-            for (int i = 1; i < Pts; i++) c.LineTo(new Point(w * i / (Pts - 1), h - Math.Pow(v[i], 0.85) * h * 0.92), true, true);
+            c.BeginFigure(new Point(0, y[0]), false, false);
+            for (int i = 1; i < Pts; i++) c.LineTo(new Point(w * i / (Pts - 1), y[i]), true, true);
         }
         top.Freeze(); dc.DrawGeometry(null, line, top);
     }
